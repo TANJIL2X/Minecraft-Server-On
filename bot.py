@@ -113,4 +113,4 @@ class ServerPanel(discord.ui.View):
                             response.status,
                             (await response.text())[:300]
                         )
-                        message =
+                        message = "NOXORA MC start request sent!"
