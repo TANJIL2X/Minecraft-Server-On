@@ -1,16 +1,17 @@
 ```python
 import os
 import asyncio
-import itertools
 import aiohttp
 import discord
 
 from discord import app_commands
+from discord.ext import tasks
 from mcstatus import JavaServer
 
-# ==============================
+
+# ==========================================
 # NOXORA S-ON CONFIGURATION
-# ==============================
+# ==========================================
 
 DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
 PANEL_URL = os.environ["PANEL_URL"].rstrip("/")
@@ -22,17 +23,19 @@ MINECRAFT_ADDRESS = os.environ["MINECRAFT_ADDRESS"]
 intents = discord.Intents.default()
 
 
-# ==============================
+# ==========================================
 # MINECRAFT SERVER STATUS
-# ==============================
+# ==========================================
 
 async def get_server_status():
     try:
         server = JavaServer.lookup(MINECRAFT_ADDRESS)
+
         status = await asyncio.wait_for(
             server.async_status(),
             timeout=5
         )
+
         return {
             "online": True,
             "players": status.players.online,
@@ -40,7 +43,9 @@ async def get_server_status():
             "version": status.version.name
         }
 
-    except Exception:
+    except Exception as error:
+        print(f"Minecraft status error: {error}")
+
         return {
             "online": False,
             "players": 0,
@@ -49,18 +54,23 @@ async def get_server_status():
         }
 
 
-def has_manager_role(interaction):
-    user = interaction.user
+# ==========================================
+# ROLE PERMISSION
+# ==========================================
 
-    return (
-        isinstance(user, discord.Member)
-        and any(role.id == ALLOWED_ROLE_ID for role in user.roles)
+def has_manager_role(interaction: discord.Interaction):
+    if not isinstance(interaction.user, discord.Member):
+        return False
+
+    return any(
+        role.id == ALLOWED_ROLE_ID
+        for role in interaction.user.roles
     )
 
 
-# ==============================
-# SERVER CONTROL BUTTONS
-# ==============================
+# ==========================================
+# SERVER START BUTTON
+# ==========================================
 
 class ServerPanel(discord.ui.View):
 
@@ -73,11 +83,16 @@ class ServerPanel(discord.ui.View):
         style=discord.ButtonStyle.success,
         custom_id="noxora:start"
     )
-    async def start_server(self, interaction, button):
+    async def start_server(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
 
         if not has_manager_role(interaction):
             await interaction.response.send_message(
-                "🛡️ You need the Server Manager role to start the server.",
+                "🛡️ You need the Server Manager role "
+                "to start NOXORA MC.",
                 ephemeral=True
             )
             return
@@ -99,37 +114,54 @@ class ServerPanel(discord.ui.View):
         }
 
         try:
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=20)
+
+            async with aiohttp.ClientSession(
+                timeout=timeout
+            ) as session:
+
                 async with session.post(
                     url,
                     headers=headers,
-                    json={"signal": "start"},
-                    timeout=aiohttp.ClientTimeout(total=20)
+                    json={"signal": "start"}
                 ) as response:
 
                     if response.status in (200, 202, 204):
-                        message = (
-                            "🟢 Start request sent!\n"
-                            "Please wait while NOXORA MC starts."
+                        await interaction.followup.send(
+                            "🟢 **NOXORA MC**\n"
+                            "Start request sent successfully!\n"
+                            "Please wait for the server to start.",
+                            ephemeral=True
                         )
+
                     else:
+                        error_text = await response.text()
+
                         print(
-                            "Panel API error:",
-                            response.status,
-                            (await response.text())[:300]
-                        )
-                        message = (
-                            f"❌ Hosting API returned HTTP "
-                            f"{response.status}. Check the panel settings."
+                            f"Hosting API error: "
+                            f"{response.status} - {error_text[:300]}"
                         )
 
-        except (aiohttp.ClientError, asyncio.TimeoutError):
-            message = "❌ Could not connect to the hosting panel."
+                        await interaction.followup.send(
+                            f"❌ Hosting API error: "
+                            f"HTTP {response.status}\n"
+                            "Please check your Railway variables "
+                            "and hosting API access.",
+                            ephemeral=True
+                        )
 
-        await interaction.followup.send(
-            message,
-            ephemeral=True
-        )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+            print(f"Hosting connection error: {error}")
+
+            await interaction.followup.send(
+                "❌ Could not connect to the hosting panel.",
+                ephemeral=True
+            )
+
+
+    # ======================================
+    # SERVER STATUS BUTTON
+    # ======================================
 
     @discord.ui.button(
         label="SERVER STATUS",
@@ -137,27 +169,41 @@ class ServerPanel(discord.ui.View):
         style=discord.ButtonStyle.primary,
         custom_id="noxora:status"
     )
-    async def server_status(self, interaction, button):
+    async def server_status(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
 
         await interaction.response.defer(ephemeral=True)
 
         data = await get_server_status()
 
         if data["online"]:
+
             embed = discord.Embed(
                 title="🟢 NOXORA MC — ONLINE",
+                description="The Minecraft server is responding.",
                 color=discord.Color.green()
             )
+
             embed.add_field(
-                name="Players",
-                value=f'{data["players"]}/{data["max_players"]}'
+                name="👥 Players",
+                value=(
+                    f'{data["players"]}/'
+                    f'{data["max_players"]}'
+                ),
+                inline=True
             )
+
             embed.add_field(
-                name="Version",
+                name="🎮 Version",
                 value=data["version"],
-                inline=False
+                inline=True
             )
+
         else:
+
             embed = discord.Embed(
                 title="🔴 NOXORA MC — OFFLINE",
                 description=(
@@ -166,108 +212,128 @@ class ServerPanel(discord.ui.View):
                 color=discord.Color.red()
             )
 
+        embed.set_footer(
+            text="NOXORA S-ON • Created by TANJIL"
+        )
+
         await interaction.followup.send(
             embed=embed,
             ephemeral=True
         )
 
 
-# ==============================
-# BOT SETUP
-# ==============================
+# ==========================================
+# DISCORD BOT
+# ==========================================
 
 class NoxoraBot(discord.Client):
 
     def __init__(self):
         super().__init__(intents=intents)
+
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
+
+        # Keep the buttons working after bot restarts.
         self.add_view(ServerPanel())
+
+        # Register slash commands.
         await self.tree.sync()
+
+        # Start automatic activity updates.
+        if not update_activity.is_running():
+            update_activity.start()
 
 
 bot = NoxoraBot()
 
 
-# ==============================
-# AUTO ACTIVITY + DND STATUS
-# ==============================
+# ==========================================
+# AUTOMATIC ACTIVITY AND DND STATUS
+# ==========================================
 
-async def auto_status_loop():
+activity_rotation = 0
 
-    activities = itertools.cycle([
-        discord.CustomActivity(
-            name="✦ Created by TANJIL ✦"
-        ),
-        discord.Activity(
+
+@tasks.loop(seconds=60)
+async def update_activity():
+
+    global activity_rotation
+
+    data = await get_server_status()
+
+    # Rotate between the creator activity and live server info.
+    if data["online"] and activity_rotation % 2 == 0:
+
+        activity = discord.Activity(
             type=discord.ActivityType.watching,
-            name="NOXORA MC Server"
-        )
-    ])
-
-    await bot.wait_until_ready()
-
-    while not bot.is_closed():
-
-        data = await get_server_status()
-
-        if data["online"]:
-            activity = discord.Activity(
-                type=discord.ActivityType.watching,
-                name=(
-                    f"NOXORA MC | "
-                    f"{data['players']}/{data['max_players']} Players"
-                )
+            name=(
+                f"NOXORA MC | "
+                f'{data["players"]}/{data["max_players"]} Players'
             )
-        else:
-            activity = next(activities)
-
-        await bot.change_presence(
-            status=discord.Status.dnd,
-            activity=activity
         )
 
-        await asyncio.sleep(60)
+    elif data["online"]:
+
+        activity = discord.CustomActivity(
+            name="✦ Created by TANJIL ✦"
+        )
+
+    else:
+
+        activity = discord.CustomActivity(
+            name="✦ Created by TANJIL ✦"
+        )
+
+    activity_rotation += 1
+
+    await bot.change_presence(
+        status=discord.Status.dnd,
+        activity=activity
+    )
+
+
+@update_activity.before_loop
+async def before_activity_update():
+    await bot.wait_until_ready()
 
 
 @bot.event
 async def on_ready():
+
     print(f"✅ Logged in as {bot.user}")
     print("⚡ NOXORA S-ON is online!")
-    print("🔴 Presence: Do Not Disturb")
+    print("🔴 Bot status: Do Not Disturb")
+    print("🎮 Automatic server status updates enabled")
 
 
-@bot.event
-async def setup_hook():
-    # This event is handled by the class setup_hook above.
-    pass
-
-
-# ==============================
+# ==========================================
 # /PANEL COMMAND
-# ==============================
+# ==========================================
 
 @bot.tree.command(
     name="panel",
-    description="Open the NOXORA MC control panel"
+    description="Open the NOXORA MC server control panel"
 )
 async def panel(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title="⚡ NOXORA MC",
         description=(
-            "━━━━━━━━━━━━━━━━━━\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
             "🎮 **MINECRAFT SERVER CONTROL**\n\n"
-            "🟢 Start Server — Server Manager only\n"
-            "📊 Server Status — Check server availability\n"
-            "━━━━━━━━━━━━━━━━━━"
+            "🟢 **START SERVER**\n"
+            "Start the server (Server Manager role required).\n\n"
+            "📊 **SERVER STATUS**\n"
+            "Check whether the Minecraft server is online.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━"
         ),
         color=discord.Color.from_rgb(0, 170, 255)
     )
 
     embed.set_footer(
-        text="✦ Created by TANJIL ✦ | NOXORA S-ON"
+        text="✦ Created by TANJIL ✦ • NOXORA S-ON"
     )
 
     await interaction.response.send_message(
@@ -276,13 +342,13 @@ async def panel(interaction: discord.Interaction):
     )
 
 
-# ==============================
+# ==========================================
 # /SERVERINFO COMMAND
-# ==============================
+# ==========================================
 
 @bot.tree.command(
     name="serverinfo",
-    description="View NOXORA MC server status"
+    description="Check NOXORA MC server information"
 )
 async def serverinfo(interaction: discord.Interaction):
 
@@ -290,59 +356,75 @@ async def serverinfo(interaction: discord.Interaction):
 
     data = await get_server_status()
 
-    embed = discord.Embed(
-        title="🌐 NOXORA MC SERVER INFO",
-        color=(
-            discord.Color.green()
-            if data["online"]
-            else discord.Color.red()
-        )
-    )
-
-    embed.add_field(
-        name="Status",
-        value="🟢 ONLINE" if data["online"] else "🔴 OFFLINE"
-    )
-
     if data["online"]:
+
+        embed = discord.Embed(
+            title="🌐 NOXORA MC — SERVER INFO",
+            color=discord.Color.green()
+        )
+
+        embed.add_field(
+            name="Status",
+            value="🟢 ONLINE",
+            inline=True
+        )
+
         embed.add_field(
             name="Players",
-            value=f'{data["players"]}/{data["max_players"]}'
+            value=(
+                f'{data["players"]}/'
+                f'{data["max_players"]}'
+            ),
+            inline=True
         )
+
         embed.add_field(
             name="Version",
             value=data["version"],
             inline=False
         )
 
-    embed.set_footer(text="NOXORA S-ON • Created by TANJIL")
+    else:
+
+        embed = discord.Embed(
+            title="🌐 NOXORA MC — SERVER INFO",
+            description="🔴 Server is offline or not responding.",
+            color=discord.Color.red()
+        )
+
+    embed.set_footer(
+        text="NOXORA S-ON • Created by TANJIL"
+    )
 
     await interaction.followup.send(embed=embed)
 
 
-# ==============================
+# ==========================================
 # /HELP COMMAND
-# ==============================
+# ==========================================
 
 @bot.tree.command(
     name="help",
-    description="Show NOXORA S-ON bot commands"
+    description="Show NOXORA S-ON commands"
 )
 async def help_command(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title="⚡ NOXORA S-ON — HELP",
         description=(
-            "`/panel` — Open the server control panel\n"
-            "`/serverinfo` — Check Minecraft server status\n"
+            "`/panel` — Open the server control panel\n\n"
+            "`/serverinfo` — Check server status and players\n\n"
             "`/help` — Show this help menu\n\n"
-            "🛡️ Only members with the Server Manager role "
-            "can start the server."
+            "🛡️ **Server Permissions**\n"
+            "Only members with the Server Manager role "
+            "can start the Minecraft server."
         ),
         color=discord.Color.from_rgb(0, 170, 255)
     )
 
-    embed.set_footer(text="✦ Created by TANJIL ✦")
+    embed.set_footer(
+        text="✦ Created by TANJIL ✦"
+    )
 
     await interaction.response.send_message(
         embed=embed,
@@ -350,6 +432,9 @@ async def help_command(interaction: discord.Interaction):
     )
 
 
-bot.setup_hook = bot.setup_hook
+# ==========================================
+# RUN BOT
+# ==========================================
+
 bot.run(DISCORD_TOKEN)
 ```
